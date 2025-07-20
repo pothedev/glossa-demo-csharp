@@ -18,13 +18,15 @@ public class OutputProcessor : IDisposable
     private readonly float originalVolume;
     private readonly SemaphoreSlim ttsSemaphore = new SemaphoreSlim(1, 1);
     private bool isRunning = true;
-
+    private readonly MMDevice _vaioDevice;
     public OutputProcessor()
     {
         var enumerator = new MMDeviceEnumerator();
         audioEndpoint = enumerator.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia);
         originalVolume = audioEndpoint.AudioEndpointVolume.MasterVolumeLevelScalar;
-        
+
+        _vaioDevice = GetAudioDevice("Voicemeeter Input");
+
         speechClient = new SpeechClientBuilder
         {
             CredentialsPath = "stt-key.json"
@@ -39,6 +41,7 @@ public class OutputProcessor : IDisposable
         {
             try
             {
+                //Console.WriteLine("test");
                 await ProcessAudioSession();
                 Console.WriteLine("\n🔄 Restarting audio listener...");
             }
@@ -52,12 +55,13 @@ public class OutputProcessor : IDisposable
 
     private async Task ProcessAudioSession()
     {
-        using (var capture = new WasapiLoopbackCapture())
+        using (var capture = new WasapiLoopbackCapture(_vaioDevice))
         using (var buffer = new MemoryStream())
         {
             var stopSignal = new TaskCompletionSource<bool>();
             int silentChunks = 0;
             int maxSilentChunks = SilenceLimitMs / 100;
+            bool hasSpeech = false;
 
             capture.DataAvailable += (s, e) =>
             {
@@ -76,6 +80,7 @@ public class OutputProcessor : IDisposable
                 }
                 else
                 {
+                    hasSpeech = true;
                     silentChunks = 0;
                 }
             };
@@ -84,14 +89,16 @@ public class OutputProcessor : IDisposable
             {
                 try
                 {
-                    if (buffer.Length == 0) return;
+                    if (buffer.Length == 0 || !hasSpeech) 
+                    {
+                        Console.WriteLine("🔇 No speech detected - skipping processing");
+                        return;
+                    }
 
                     byte[] originalAudio = buffer.ToArray();
-                    SaveDebugWav(originalAudio, "raw_capture.wav", capture.WaveFormat);
-                    
                     byte[] resampledAudio = ConvertToGoogleFormat(originalAudio, capture.WaveFormat);
-                    SaveDebugWav(resampledAudio, "for_stt.wav", new WaveFormat(TargetSampleRate, 16, 1));
-                    
+                    SaveDebugWav(resampledAudio, "stt_input.wav", new WaveFormat(TargetSampleRate, 16, 1));
+
                     await ProcessAudio(resampledAudio);
                 }
                 finally
@@ -104,6 +111,28 @@ public class OutputProcessor : IDisposable
             capture.StartRecording();
             await stopSignal.Task;
         }
+    }
+
+    private MMDevice GetAudioDevice(string nameContains)
+    {
+        var enumerator = new MMDeviceEnumerator();
+        var devices = enumerator.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active).ToList();
+        
+        // Try exact match first
+        var device = devices.FirstOrDefault(d => 
+            d.FriendlyName.Equals(nameContains, StringComparison.OrdinalIgnoreCase));
+        
+        // Fall back to contains
+        device ??= devices.FirstOrDefault(d => 
+            d.FriendlyName.Contains(nameContains, StringComparison.OrdinalIgnoreCase));
+        
+        if (device == null)
+        {
+            throw new Exception($"Audio device containing '{nameContains}' not found. Available devices:\n" +
+                               string.Join("\n", devices.Select(d => $"- {d.FriendlyName}")));
+        }
+        
+        return device;
     }
 
     private async Task ProcessAudio(byte[] audioBytes)

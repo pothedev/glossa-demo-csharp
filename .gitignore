@@ -6,4 +6,5 @@ lib/
 
 stt-key.json
 
-.dll
+VoicemeeterRemote.dll
+VoicemeeterRemote64.dll

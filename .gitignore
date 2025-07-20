@@ -1,0 +1,9 @@
+bin/
+obj/
+lib/
+
+.env
+
+stt-key.json
+
+.dll

@@ -6,30 +6,29 @@ using System.Threading.Tasks;
 using Google.Cloud.Speech.V1;
 using NAudio.Wave;
 using NAudio.CoreAudioApi;
-using System.Threading.Channels;
-using System.Collections.Generic;   // only if you don’t already have it
+using Google.Protobuf;
+using System.Collections.Generic;
 
 public class OutputProcessor : IDisposable
 {
     const int TargetSampleRate = 16000;
     const int SilenceLimitMs = 800;
     const float SilenceThreshold = 0.01f;
+    const int StreamingChunkSize = 4096;  // Optimal for gRPC streaming
 
-    private readonly SpeechClient speechClient;
-    private readonly MMDevice audioEndpoint;
-
-    private bool isRunning = true;
+    private readonly SpeechClient _speechClient;
     private readonly MMDevice _vaioDevice;
-    private readonly Channel<byte[]> _sttQueue = Channel.CreateUnbounded<byte[]>();
-    
+    private bool _isRunning = true;
+    private readonly WaveFormat _targetFormat = new WaveFormat(TargetSampleRate, 16, 1);
+    private readonly CancellationTokenSource _cts = new CancellationTokenSource();
+
     public OutputProcessor()
     {
         var enumerator = new MMDeviceEnumerator();
-        audioEndpoint = enumerator.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia);
+        _vaioDevice = GetAudioDevice("Voicemeeter Input") ?? 
+                      throw new Exception("Voicemeeter device not found");
 
-        _vaioDevice = GetAudioDevice("Voicemeeter Input");
-
-        speechClient = new SpeechClientBuilder
+        _speechClient = new SpeechClientBuilder
         {
             CredentialsPath = "stt-key.json"
         }.Build();
@@ -39,133 +38,185 @@ public class OutputProcessor : IDisposable
     {
         Console.WriteLine("🚀 Starting continuous audio monitoring...");
 
-        while (isRunning)
+        while (_isRunning && !_cts.IsCancellationRequested)
         {
             try
             {
                 await ProcessAudioSession();
-                Console.WriteLine("\n🔄 Restarting audio listener...");
+            }
+            catch (OperationCanceledException)
+            {
+                break;
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"⚠️ Session error: {ex.Message}");
-                await Task.Delay(1000);
+                await Task.Delay(1000, _cts.Token);
             }
         }
     }
-    
-    
 
     private async Task ProcessAudioSession()
     {
-        using (var capture = new WasapiLoopbackCapture(_vaioDevice))
-        using (var buffer = new MemoryStream())
+        using var capture = new WasapiLoopbackCapture(_vaioDevice);
+        using var buffer = new MemoryStream();
+        var stopSignal = new TaskCompletionSource<bool>();
+        int silentChunks = 0;
+        int maxSilentChunks = SilenceLimitMs / 100;
+        bool hasSpeech = false;
+
+        capture.DataAvailable += (s, e) =>
         {
-            var stopSignal = new TaskCompletionSource<bool>();
-            int silentChunks = 0;
-            int maxSilentChunks = SilenceLimitMs / 100;
-            bool hasSpeech = false;
+            if (e.BytesRecorded == 0) return;
+            
+            buffer.Write(e.Buffer, 0, e.BytesRecorded);
+            float rms = CalculateRmsFloat(e.Buffer, e.BytesRecorded);
+            bool isSilent = rms < SilenceThreshold;
 
-            capture.DataAvailable += (s, e) =>
+            if (isSilent)
             {
-                buffer.Write(e.Buffer, 0, e.BytesRecorded);
-                float rms = CalculateRmsFloat(e.Buffer, e.BytesRecorded);
-                bool isSilent = rms < SilenceThreshold;
-
-                if (isSilent)
+                silentChunks++;
+                if (hasSpeech && silentChunks >= maxSilentChunks)
                 {
-                    silentChunks++;
-                    if (silentChunks >= maxSilentChunks)
-                    {
-                        Console.WriteLine("🛑 Detected extended silence. Processing audio...");
-                        capture.StopRecording();
-                    }
+                    Console.WriteLine("🛑 Detected extended silence. Processing audio...");
+                    capture.StopRecording();
                 }
-                else
-                {
-                    hasSpeech = true;
-                    silentChunks = 0;
-                }
-            };
-
-            capture.RecordingStopped += async (s, e) =>
+            }
+            else
             {
-                try
+                hasSpeech = true;
+                silentChunks = 0;
+            }
+        };
+
+        capture.RecordingStopped += async (s, e) =>
+        {
+            try
+            {
+                if (buffer.Length == 0 || !hasSpeech)
                 {
-                    if (buffer.Length == 0 || !hasSpeech)
-                    {
-                        Console.WriteLine("🔇 No speech detected - skipping processing");
-                        return;
-                    }
-
-                    byte[] originalAudio = buffer.ToArray();
-                    byte[] resampledAudio = ConvertToGoogleFormat(originalAudio, capture.WaveFormat);
-                    SaveDebugWav(resampledAudio, "stt_input.wav", new WaveFormat(TargetSampleRate, 16, 1));
-
-                    await ProcessAudio(resampledAudio);
+                    Console.WriteLine("🔇 No speech detected - skipping processing");
+                    return;
                 }
-                finally
-                {
-                    stopSignal.SetResult(true);
-                }
-            };
 
-            Console.WriteLine("👂 Listening for audio...");
-            capture.StartRecording();
-            await stopSignal.Task;
-        }
+                byte[] resampledAudio = ConvertToGoogleFormat(buffer.GetBuffer(), capture.WaveFormat);
+                SaveDebugWav(resampledAudio, "stt_input.wav", _targetFormat);
+
+                await ProcessAudioWithStreaming(resampledAudio);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ Processing error: {ex.Message}");
+            }
+            finally
+            {
+                stopSignal.TrySetResult(true);
+            }
+        };
+
+        Console.WriteLine("👂 Listening for audio...");
+        capture.StartRecording();
+        await stopSignal.Task;
     }
 
     private MMDevice GetAudioDevice(string nameContains)
     {
-        var enumerator = new MMDeviceEnumerator();
-        var devices = enumerator.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active).ToList();
-        
-        // Try exact match first
-        var device = devices.FirstOrDefault(d => 
-            d.FriendlyName.Equals(nameContains, StringComparison.OrdinalIgnoreCase));
-        
-        // Fall back to contains
-        device ??= devices.FirstOrDefault(d => 
-            d.FriendlyName.Contains(nameContains, StringComparison.OrdinalIgnoreCase));
-        
-        if (device == null)
-        {
-            throw new Exception($"Audio device containing '{nameContains}' not found. Available devices:\n" +
-                               string.Join("\n", devices.Select(d => $"- {d.FriendlyName}")));
-        }
-        
-        return device;
+        using var enumerator = new MMDeviceEnumerator();
+        return enumerator.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active)
+            .FirstOrDefault(d => d.FriendlyName.Contains(nameContains, StringComparison.OrdinalIgnoreCase));
     }
 
-    private async Task ProcessAudio(byte[] audioBytes)
+    private async Task ProcessAudioWithStreaming(byte[] audioBytes)
     {
         try
         {
-            var response = await speechClient.RecognizeAsync(new RecognitionConfig
+            var streamingCall = _speechClient.StreamingRecognize();
+            
+            // Send configuration first
+            await streamingCall.WriteAsync(new StreamingRecognizeRequest
             {
-                Encoding = RecognitionConfig.Types.AudioEncoding.Linear16,
-                SampleRateHertz = TargetSampleRate,
-                LanguageCode = Config.LanguageFrom,
-                EnableAutomaticPunctuation = true
-            }, RecognitionAudio.FromBytes(audioBytes));
+                StreamingConfig = new StreamingRecognitionConfig
+                {
+                    Config = new RecognitionConfig
+                    {
+                        Encoding = RecognitionConfig.Types.AudioEncoding.Linear16,
+                        SampleRateHertz = TargetSampleRate,
+                        LanguageCode = Config.LanguageFrom,
+                        EnableAutomaticPunctuation = true
+                    },
+                    InterimResults = false
+                }
+            });
 
-            var fullTranscript = string.Join(" ", response.Results
-                .Where(r => r.Alternatives.Count > 0)
-                .Select(r => r.Alternatives[0].Transcript));
+            // Stream audio in chunks
+            int offset = 0;
+            while (offset < audioBytes.Length && !_cts.IsCancellationRequested)
+            {
+                int chunkSize = Math.Min(StreamingChunkSize, audioBytes.Length - offset);
+                var request = new StreamingRecognizeRequest
+                {
+                    AudioContent = ByteString.CopyFrom(audioBytes, offset, chunkSize)
+                };
+                await streamingCall.WriteAsync(request);
+                offset += chunkSize;
+            }
+            
+            await streamingCall.WriteCompleteAsync();
+            var responseStream = streamingCall.GetResponseStream();
 
+            // Process results
+            var transcripts = new List<string>();
+            await foreach (var response in responseStream.WithCancellation(_cts.Token))
+            {
+                foreach (var result in response.Results)
+                {
+                    if (result.Alternatives.Count > 0)
+                    {
+                        transcripts.Add(result.Alternatives[0].Transcript);
+                    }
+                }
+            }
+
+            string fullTranscript = string.Join(" ", transcripts);
             if (!string.IsNullOrWhiteSpace(fullTranscript))
             {
                 Console.WriteLine($"✅ Full Transcription: {fullTranscript}");
                 string translated = await Translator.Translate(fullTranscript);
                 Console.WriteLine($"🌍 Full Translation: {translated}");
 
-                _ = OutputTTS.Speak(translated); // Fire-and-forget
+                _ = OutputTTS.Speak(translated);
             }
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"❌ Processing error: {ex.Message}");
+            Console.WriteLine($"❌ gRPC Streaming error: {ex.Message}");
+        }
+    }
+
+    private byte[] ConvertToGoogleFormat(byte[] audio, WaveFormat sourceFormat)
+    {
+        try
+        {
+            // 1. First convert the float audio to 16-bit PCM
+            byte[] pcmBuffer = ConvertFloatTo16BitPcm(audio);
+            
+            // 2. Then resample using MediaFoundation
+            using (var pcmStream = new RawSourceWaveStream(new MemoryStream(pcmBuffer), 
+                new WaveFormat(sourceFormat.SampleRate, 16, sourceFormat.Channels)))
+            using (var resampler = new MediaFoundationResampler(pcmStream, new WaveFormat(TargetSampleRate, 16, 1)))
+            {
+                resampler.ResamplerQuality = 60;
+                using (var outputStream = new MemoryStream())
+                {
+                    WaveFileWriter.WriteWavFileToStream(outputStream, resampler);
+                    return outputStream.ToArray();
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"❌ Audio conversion error: {ex.Message}");
+            throw;
         }
     }
 
@@ -177,47 +228,15 @@ public class OutputProcessor : IDisposable
             Directory.CreateDirectory(debugDir);
             var filePath = Path.Combine(debugDir, $"{DateTime.Now:yyyyMMdd_HHmmssfff}_{filename}");
 
-            using (var memStream = new MemoryStream(audioData))
-            using (var reader = new RawSourceWaveStream(memStream, format))
-            {
-                WaveFileWriter.CreateWaveFile(filePath, reader);
-            }
-
-            Console.WriteLine($"🔊 Saved debug audio: {filePath}");
+            using var memStream = new MemoryStream(audioData);
+            using var reader = new RawSourceWaveStream(memStream, format);
+            WaveFileWriter.CreateWaveFile(filePath, reader);
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"⚠️ Failed to save debug audio: {ex.Message}");
+            Console.WriteLine($"⚠️ Debug audio save failed: {ex.Message}");
         }
     }
-
-    private byte[] ConvertToGoogleFormat(byte[] audio, WaveFormat sourceFormat)
-    {
-        using (var sourceStream = new MemoryStream(audio))
-        using (var sourceReader = new RawSourceWaveStream(sourceStream, sourceFormat))
-        {
-            var floatBuffer = new byte[sourceReader.Length];
-            sourceReader.Read(floatBuffer, 0, floatBuffer.Length);
-            
-            var pcmBuffer = ConvertFloatTo16BitPcm(floatBuffer);
-            
-            var pcmStream = new RawSourceWaveStream(
-                new MemoryStream(pcmBuffer), 
-                new WaveFormat(sourceFormat.SampleRate, 16, sourceFormat.Channels));
-            
-            var targetFormat = new WaveFormat(TargetSampleRate, 16, 1);
-            using (var resampler = new MediaFoundationResampler(pcmStream, targetFormat))
-            {
-                resampler.ResamplerQuality = 60;
-                using (var outputStream = new MemoryStream())
-                {
-                    WaveFileWriter.WriteWavFileToStream(outputStream, resampler);
-                    return outputStream.ToArray();
-                }
-            }
-        }
-    }
-
     private byte[] ConvertFloatTo16BitPcm(byte[] floatBuffer)
     {
         int sampleCount = floatBuffer.Length / 4;
@@ -251,8 +270,9 @@ public class OutputProcessor : IDisposable
 
     public void Dispose()
     {
-        isRunning = false;
-        audioEndpoint?.Dispose();
+        _isRunning = false;
+        _cts.Cancel();
+        _vaioDevice?.Dispose();
         GC.SuppressFinalize(this);
     }
 }

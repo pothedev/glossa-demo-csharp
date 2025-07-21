@@ -93,7 +93,7 @@ public class InputProcessor
 
                 string translated = await Translator.Translate(transcript); // Optional translation
                 Console.WriteLine("🌍 Translated: " + translated);
-                ElevenLabsTTS.Speak(translated);
+                InputTTS.Speak(translated);
             }
         }
         catch (Exception ex)

@@ -6,24 +6,26 @@ using System.Threading.Tasks;
 using Google.Cloud.Speech.V1;
 using NAudio.Wave;
 using NAudio.CoreAudioApi;
+using System.Threading.Channels;
+using System.Collections.Generic;   // only if you don’t already have it
 
 public class OutputProcessor : IDisposable
 {
     const int TargetSampleRate = 16000;
-    const int SilenceLimitMs = 500;
+    const int SilenceLimitMs = 800;
     const float SilenceThreshold = 0.01f;
 
     private readonly SpeechClient speechClient;
     private readonly MMDevice audioEndpoint;
-    private readonly float originalVolume;
-    private readonly SemaphoreSlim ttsSemaphore = new SemaphoreSlim(1, 1);
+
     private bool isRunning = true;
     private readonly MMDevice _vaioDevice;
+    private readonly Channel<byte[]> _sttQueue = Channel.CreateUnbounded<byte[]>();
+    
     public OutputProcessor()
     {
         var enumerator = new MMDeviceEnumerator();
         audioEndpoint = enumerator.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia);
-        originalVolume = audioEndpoint.AudioEndpointVolume.MasterVolumeLevelScalar;
 
         _vaioDevice = GetAudioDevice("Voicemeeter Input");
 
@@ -41,7 +43,6 @@ public class OutputProcessor : IDisposable
         {
             try
             {
-                //Console.WriteLine("test");
                 await ProcessAudioSession();
                 Console.WriteLine("\n🔄 Restarting audio listener...");
             }
@@ -52,6 +53,8 @@ public class OutputProcessor : IDisposable
             }
         }
     }
+    
+    
 
     private async Task ProcessAudioSession()
     {
@@ -89,7 +92,7 @@ public class OutputProcessor : IDisposable
             {
                 try
                 {
-                    if (buffer.Length == 0 || !hasSpeech) 
+                    if (buffer.Length == 0 || !hasSpeech)
                     {
                         Console.WriteLine("🔇 No speech detected - skipping processing");
                         return;
@@ -157,22 +160,12 @@ public class OutputProcessor : IDisposable
                 string translated = await Translator.Translate(fullTranscript);
                 Console.WriteLine($"🌍 Full Translation: {translated}");
 
-                await ttsSemaphore.WaitAsync();
-                try
-                {
-                    ElevenLabsTTS.Speak(translated);
-                }
-                finally
-                {
-                    RestoreSystemVolume();
-                    ttsSemaphore.Release();
-                }
+                _ = OutputTTS.Speak(translated); // Fire-and-forget
             }
         }
         catch (Exception ex)
         {
             Console.WriteLine($"❌ Processing error: {ex.Message}");
-            RestoreSystemVolume();
         }
     }
 
@@ -196,12 +189,6 @@ public class OutputProcessor : IDisposable
         {
             Console.WriteLine($"⚠️ Failed to save debug audio: {ex.Message}");
         }
-    }
-
-
-    private void RestoreSystemVolume()
-    {
-        audioEndpoint.AudioEndpointVolume.MasterVolumeLevelScalar = originalVolume;
     }
 
     private byte[] ConvertToGoogleFormat(byte[] audio, WaveFormat sourceFormat)
@@ -265,10 +252,7 @@ public class OutputProcessor : IDisposable
     public void Dispose()
     {
         isRunning = false;
-        RestoreSystemVolume();
         audioEndpoint?.Dispose();
-        ttsSemaphore?.Dispose();
-        // speechClient doesn't need disposal
         GC.SuppressFinalize(this);
     }
 }

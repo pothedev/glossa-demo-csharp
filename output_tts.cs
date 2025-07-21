@@ -11,7 +11,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 
-public static class ElevenLabsTTS
+public static class OutputTTS
 {
     // Voicemeeter API imports
     [DllImport("VoicemeeterRemote64.dll")]
@@ -21,7 +21,7 @@ public static class ElevenLabsTTS
     [DllImport("VoicemeeterRemote64.dll")]
     private static extern int VBVMR_GetParameterFloat(string param, ref float value);
     
-    private const int VAIO_STRIP = 3;  // VAIO3 strip
+    private const int VAIO_STRIP = 3;  
     private const float MUTED_VOLUME = -10.0f;
     private static readonly SemaphoreSlim _voicemeeterLock = new SemaphoreSlim(1, 1);
     private static bool _voicemeeterInitialized = false;
@@ -83,8 +83,7 @@ public static class ElevenLabsTTS
         {
             waveOut?.Dispose();
             // Restore VAIO volume (ignore errors during cleanup)
-            try { SetParameterSafe($"Strip[{VAIO_STRIP}].Gain", originalVaioVolume); }
-            catch { /* Suppress errors during cleanup */ }
+            SetParameterSafe($"Strip[{VAIO_STRIP}].Gain", originalVaioVolume);
         }
     }
 

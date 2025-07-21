@@ -1,122 +1,148 @@
 using System;
 using System.IO;
+using System.Threading;
 using System.Threading.Tasks;
+using System.Collections.Concurrent;
 using Google.Cloud.Speech.V1;
 using NAudio.Wave;
-using System.Speech.Recognition;
+using Google.Protobuf;
 
 public class InputProcessor
 {
     const int SampleRate = 16000;
-    const int SilenceLimitMs = 500;
-    const float SilenceThreshold = 0.02f;
+    private readonly SpeechClient _speechClient;
+    private readonly BlockingCollection<byte[]> _audioBufferQueue = new BlockingCollection<byte[]>(100);
+    private readonly CancellationTokenSource _cts = new CancellationTokenSource();
+    private Task _processingTask;
 
-    private SpeechClient speechClient;
-    private bool isListening = true;
-
-    public async Task Start()
+    public InputProcessor()
     {
-        foreach (var recognizer in SpeechRecognitionEngine.InstalledRecognizers())
-        {
-            Console.WriteLine($"ID: {recognizer.Id}, Culture: {recognizer.Culture}");
-        }
-
-        speechClient = new SpeechClientBuilder
+        _speechClient = new SpeechClientBuilder
         {
             CredentialsPath = "stt-key.json"
         }.Build();
+    }
 
-        Console.WriteLine("🎤 Speak freely. The program will listen continuously.\n");
+    public async Task Start()
+    {
+        Console.WriteLine("🎤 Speak freely. Continuous listening active.\n");
+        _processingTask = Task.Run(ProcessAudioBuffers);
+        await StartContinuousRecognitionAsync();
+    }
 
-        while (isListening)
+    public async Task StopAsync()
+    {
+        _cts.Cancel();
+        _audioBufferQueue.CompleteAdding();
+        await _processingTask;
+    }
+
+    private async Task StartContinuousRecognitionAsync()
+    {
+        using (var waveIn = new WaveInEvent())
         {
-            await ListenAndProcessOnce();
+            waveIn.WaveFormat = new WaveFormat(SampleRate, 1);
+            waveIn.BufferMilliseconds = 100;
+            waveIn.DataAvailable += (s, e) => 
+            {
+                var buffer = new byte[e.BytesRecorded];
+                Buffer.BlockCopy(e.Buffer, 0, buffer, 0, e.BytesRecorded);
+                _audioBufferQueue.Add(buffer);
+            };
+
+            waveIn.StartRecording();
+            Console.WriteLine("Microphone recording started...");
+            await Task.Delay(-1, _cts.Token); // Block until canceled
+            waveIn.StopRecording();
         }
     }
 
-    private async Task ListenAndProcessOnce()
-    {
-        var waveIn = new WaveInEvent
-        {
-            WaveFormat = new WaveFormat(SampleRate, 1),
-            BufferMilliseconds = 100
-        };
-
-        var buffer = new MemoryStream();
-        int silentChunks = 0;
-        int maxSilentChunks = SilenceLimitMs / waveIn.BufferMilliseconds;
-
-        var stopSignal = new TaskCompletionSource();
-
-        waveIn.DataAvailable += (s, a) =>
-        {
-            buffer.Write(a.Buffer, 0, a.BytesRecorded);
-
-            if (IsSilent(a.Buffer, a.BytesRecorded))
-            {
-                silentChunks++;
-                if (silentChunks >= maxSilentChunks)
-                {
-                    waveIn.StopRecording();
-                }
-            }
-            else
-            {
-                silentChunks = 0;
-            }
-        };
-
-        waveIn.RecordingStopped += (s, a) => stopSignal.SetResult();
-
-        waveIn.StartRecording();
-        await stopSignal.Task;
-
-        byte[] audioData = buffer.ToArray();
-        _ = Task.Run(() => TranscribeAndSpeak(audioData));
-    }
-
-    private async Task TranscribeAndSpeak(byte[] audioBytes)
+    private async Task ProcessAudioBuffers()
+{
+    while (!_audioBufferQueue.IsCompleted)
     {
         try
         {
-            var response = speechClient.Recognize(new RecognitionConfig
-            {
-                Encoding = RecognitionConfig.Types.AudioEncoding.Linear16,
-                SampleRateHertz = SampleRate,
-                LanguageCode = Config.LanguageFrom
-            }, RecognitionAudio.FromBytes(audioBytes));
+            // Create the streaming call
+            var streamingCall = _speechClient.StreamingRecognize();
 
-            foreach (var result in response.Results)
+            // Start the writer task
+            var writeTask = Task.Run(async () =>
             {
-                string transcript = result.Alternatives[0].Transcript;
-                Console.WriteLine("✅ Final: " + transcript);
+                try
+                {
+                    // First write the config
+                    await streamingCall.WriteAsync(new StreamingRecognizeRequest
+                    {
+                        StreamingConfig = new StreamingRecognitionConfig
+                        {
+                            Config = new RecognitionConfig
+                            {
+                                Encoding = RecognitionConfig.Types.AudioEncoding.Linear16,
+                                SampleRateHertz = SampleRate,
+                                LanguageCode = Config.LanguageFrom,
+                                EnableAutomaticPunctuation = true
+                            },
+                            InterimResults = false,
+                        }
+                    });
 
-                string translated = await Translator.Translate(transcript); // Optional translation
-                Console.WriteLine("🌍 Translated: " + translated);
-                InputTTS.Speak(translated);
+                    // Then write the audio content
+                    foreach (var buffer in _audioBufferQueue.GetConsumingEnumerable(_cts.Token))
+                    {
+                        await streamingCall.WriteAsync(new StreamingRecognizeRequest
+                        {
+                            AudioContent = ByteString.CopyFrom(buffer)
+                        });
+                    }
+                }
+                finally
+                {
+                    await streamingCall.WriteCompleteAsync();
+                }
+            });
+
+            // Read responses
+            await foreach (var response in streamingCall.GetResponseStream())
+            {
+                foreach (var result in response.Results)
+                {
+                    if (result.IsFinal)
+                    {
+                        await ProcessFinalResult(result);
+                    }
+                }
             }
+
+            await writeTask;
+        }
+        catch (Exception ex) when (ex is OperationCanceledException || ex is TaskCanceledException)
+        {
+            // Normal shutdown
         }
         catch (Exception ex)
         {
-            Console.WriteLine("❌ Transcription failed: " + ex.Message);
+            Console.WriteLine($"❌ Processing error: {ex.Message}");
+            await Task.Delay(1000, _cts.Token);
         }
     }
+}
 
-    private bool IsSilent(byte[] buffer, int bytesRecorded, float threshold = SilenceThreshold)
+    private async Task ProcessFinalResult(StreamingRecognitionResult result)
     {
-        int bytesPerSample = 2;
-        int samples = bytesRecorded / bytesPerSample;
-        if (samples == 0) return true;
-
-        double sumSquares = 0;
-        for (int i = 0; i < bytesRecorded; i += bytesPerSample)
+        try
         {
-            short sample = BitConverter.ToInt16(buffer, i);
-            float amplitude = sample / 32768f;
-            sumSquares += amplitude * amplitude;
-        }
+            string transcript = result.Alternatives[0].Transcript;
+            Console.WriteLine($"✅ Final: {transcript}");
 
-        float rms = (float)Math.Sqrt(sumSquares / samples);
-        return rms < threshold;
+            string translated = await Translator.Translate(transcript);
+            Console.WriteLine($"🌍 Translated: {translated}");
+            
+            await InputTTS.Speak(translated);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"❌ Processing error: {ex.Message}");
+        }
     }
 }

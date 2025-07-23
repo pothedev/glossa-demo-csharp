@@ -1,15 +1,48 @@
 using System;
+using System.Collections.Concurrent;
 using System.Linq;
 using System.Net.Http;
 using System.Text;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using NAudio.Wave;
 using NAudio.CoreAudioApi;
 
-public static class InputTTS
+public static class InputTTS_ElevenLabs
 {
-    public static async Task Speak(string text)
+    private static readonly ConcurrentQueue<string> _speechQueue = new();
+    private static readonly SemaphoreSlim _playbackLock = new(1, 1);
+    private static bool _isPlaying;
+
+    public static Task Speak(string text)
+    {
+        _speechQueue.Enqueue(text);
+        _ = ProcessQueueAsync(); // Fire-and-forget queue processing
+        return Task.CompletedTask;
+    }
+
+    private static async Task ProcessQueueAsync()
+    {
+        if (_isPlaying) return;
+
+        await _playbackLock.WaitAsync();
+        try
+        {
+            _isPlaying = true;
+            while (_speechQueue.TryDequeue(out var text))
+            {
+                await PlayTextAsync(text);
+            }
+        }
+        finally
+        {
+            _isPlaying = false;
+            _playbackLock.Release();
+        }
+    }
+
+    private static async Task PlayTextAsync(string text)
     {
         // 1. Look for the render endpoint
         var enumerator = new MMDeviceEnumerator();
@@ -21,7 +54,7 @@ public static class InputTTS
             var list = string.Join(", ",
                 enumerator.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active)
                             .Select(d => d.FriendlyName));
-            throw new Exception("Voicemeeter Out A2 render device not found.");
+            throw new Exception("Voicemeeter VAIO3 render device not found. Available devices: " + list);
         }
 
         // 2. Check API key
@@ -30,6 +63,7 @@ public static class InputTTS
         {
             throw new Exception("Missing ElevenLabs API key.");
         }
+
         // 3. Build JSON payload
         var payload = JsonSerializer.Serialize(new
         {
@@ -39,7 +73,6 @@ public static class InputTTS
             {
                 stability = 0.5f,
                 similarity_boost = 0.75f,
-
             }
         });
 
@@ -47,17 +80,20 @@ public static class InputTTS
         using var http = new HttpClient();
         http.DefaultRequestHeaders.Add("xi-api-key", apiKey);
         const string url = "https://api.elevenlabs.io/v1/text-to-speech/aMSt68OGf4xUZAnLpTU8/stream";
+        
         var resp = await http.PostAsync(
             url,
             new StringContent(payload, Encoding.UTF8, "application/json"));
         resp.EnsureSuccessStatusCode();
 
-        // 5. Play audio
+        // 5. Play audio with proper completion waiting
         using var waveOut = new WasapiOut(outputDevice, AudioClientShareMode.Shared, false, 200);
+        var tcs = new TaskCompletionSource<bool>();
+        
+        waveOut.PlaybackStopped += (s, e) => tcs.TrySetResult(true);
         waveOut.Init(new Mp3FileReader(await resp.Content.ReadAsStreamAsync()));
         waveOut.Play();
-
-        while (waveOut.PlaybackState == PlaybackState.Playing)
-            await Task.Delay(100);
+        
+        await tcs.Task; // Wait for playback to complete
     }
 }

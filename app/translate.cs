@@ -9,8 +9,6 @@ public static class Translator
 {
     public static async Task<string> Translate(string text)
     {
-        Env.Load();
-
         string DeeplKey = Environment.GetEnvironmentVariable("DEEPL_API_KEY");
         if (string.IsNullOrEmpty(DeeplKey))
             throw new Exception("DEEPL_API_KEY is missing in .env or environment.");

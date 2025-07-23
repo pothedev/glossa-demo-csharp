@@ -10,9 +10,11 @@ using DotNetEnv;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
+using System.Collections.Concurrent;
 
-public static class OutputTTS
+public static class OutputTTS_ElevenLabs
 {
+
     // Voicemeeter API imports
     [DllImport("VoicemeeterRemote64.dll")]
     private static extern int VBVMR_Login();
@@ -26,33 +28,57 @@ public static class OutputTTS
     private static readonly SemaphoreSlim _voicemeeterLock = new SemaphoreSlim(1, 1);
     private static bool _voicemeeterInitialized = false;
 
-    public static async Task Speak(string text)
+    private static readonly ConcurrentQueue<string> _speechQueue = new();
+    private static readonly SemaphoreSlim _playbackLock = new(1, 1);
+    private static bool _isPlaying;
+
+    public static Task Speak(string text)
+    {
+        _speechQueue.Enqueue(text);
+        _ = ProcessQueueAsync(); // Fire-and-forget
+        return Task.CompletedTask;
+    }
+
+    private static async Task ProcessQueueAsync()
+    {
+        if (_isPlaying) return;
+
+        await _playbackLock.WaitAsync();
+        try
+        {
+            _isPlaying = true;
+            while (_speechQueue.TryDequeue(out var text))
+            {
+                await PlayTextAsync(text);
+            }
+        }
+        finally
+        {
+            _isPlaying = false;
+            _playbackLock.Release();
+        }
+    }
+
+    private static async Task PlayTextAsync(string text)
     {
         WasapiOut waveOut = null;
         float originalVaioVolume = 0f;
 
         try
         {
-            // 1. Initialize Voicemeeter (thread-safe with retries)
             await InitializeVoicemeeter();
-
-            // 2. Store and modify VAIO volume only
             VBVMR_GetParameterFloat($"Strip[{VAIO_STRIP}].Gain", ref originalVaioVolume);
             SetParameterSafe($"Strip[{VAIO_STRIP}].Gain", MUTED_VOLUME);
 
-            // 3. Find AUX output device (flexible name matching)
             var enumerator = new MMDeviceEnumerator();
             var outputDevice = enumerator.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active)
                 .FirstOrDefault(d => d.FriendlyName.Contains("Voicemeeter AUX")) 
-                ?? throw new Exception("AUX device not found. Available devices: " + 
-                    string.Join(", ", enumerator.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active)
-                    .Select(d => d.FriendlyName)));
+                ?? throw new Exception("AUX device not found");
 
-            // 4. Play TTS through AUX
             using var httpClient = new HttpClient();
             httpClient.DefaultRequestHeaders.Add("xi-api-key", 
                 Environment.GetEnvironmentVariable("ELEVENLABS_API_KEY") 
-                ?? throw new Exception("Missing ElevenLabs API key in .env"));
+                ?? throw new Exception("Missing API key"));
 
             var response = await httpClient.PostAsync(
                 "https://api.elevenlabs.io/v1/text-to-speech/aMSt68OGf4xUZAnLpTU8/stream",
@@ -71,18 +97,16 @@ public static class OutputTTS
             response.EnsureSuccessStatusCode();
 
             waveOut = new WasapiOut(outputDevice, AudioClientShareMode.Shared, false, 200);
+            var tcs = new TaskCompletionSource<bool>();
+            waveOut.PlaybackStopped += (s, e) => tcs.TrySetResult(true);
+            
             waveOut.Init(new Mp3FileReader(await response.Content.ReadAsStreamAsync()));
             waveOut.Play();
-
-            while (waveOut.PlaybackState == PlaybackState.Playing)
-            {
-                await Task.Delay(100);
-            }
+            await tcs.Task; // Properly await playback completion
         }
         finally
         {
             waveOut?.Dispose();
-            // Restore VAIO volume (ignore errors during cleanup)
             SetParameterSafe($"Strip[{VAIO_STRIP}].Gain", originalVaioVolume);
         }
     }

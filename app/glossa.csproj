@@ -10,10 +10,11 @@
   <ItemGroup>
     <PackageReference Include="DotNetEnv" Version="3.1.1" />
     <PackageReference Include="Google.Cloud.Speech.V1" Version="3.8.0" />
+    <PackageReference Include="Google.Cloud.TextToSpeech.V1" Version="3.12.0" />
     <PackageReference Include="Grpc.Core" Version="2.46.6" />
     <PackageReference Include="NAudio" Version="2.2.1" />
     <PackageReference Include="System.Speech" Version="9.0.7" />
-    <Content Include="VoicemeeterRemote64.dll">
+    <Content Include="../VoicemeeterRemote64.dll">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
   </ItemGroup>

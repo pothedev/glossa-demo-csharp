@@ -1,13 +1,13 @@
 using System;
 using System.IO;
 using System.Threading.Tasks;
+using DotNetEnv;
 
 class Program
 {
     static async Task Main()
     {
-        Console.WriteLine($"DLL exists: {File.Exists("VoicemeeterRemote64.dll")}");
-        Console.WriteLine($"Current directory: {Environment.CurrentDirectory}");
+        Env.Load("../.env");
 
         Console.WriteLine("=== Voice Processor Menu ===");
         Console.WriteLine("1. Run Input Only");

@@ -30,7 +30,7 @@ public class OutputProcessor : IDisposable
 
         _speechClient = new SpeechClientBuilder
         {
-            CredentialsPath = "stt-key.json"
+            CredentialsPath = "../google-key.json"
         }.Build();
     }
 
@@ -184,7 +184,21 @@ public class OutputProcessor : IDisposable
                 string translated = await Translator.Translate(fullTranscript);
                 Console.WriteLine($"🌍 Full Translation: {translated}");
 
-                _ = OutputTTS.Speak(translated);
+                switch (Config.OutputTTSModel)
+                {
+                    case "Google":
+                        _ = OutputTTS_Google.Speak(translated);
+                        break;
+                    case "ElevenLabs":
+                        _ = OutputTTS_ElevenLabs.Speak(translated);
+                        break;
+                    case "Native":
+                        _ = OutputTTS_Native.Speak(translated);
+                        break;
+                    default:
+                        _ = OutputTTS_Native.Speak(translated);
+                        break;
+                }
             }
         }
         catch (Exception ex)

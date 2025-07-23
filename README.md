@@ -41,7 +41,7 @@ Glossa uses **Voicemeeter Potato** to manage all audio streams. Below are detail
 
 This diagram shows how user speech is captured, translated, and sent back into a voice chat app:
 
-![Input Audio Flow](./assets/input_audio_flow.jpg)
+![Input Audio Flow](./docs/input_audio_flow.jpg)
 
 > The original speech is captured by a physical microphone and routed into **Glossa** for STT + translation + TTS. The translated speech is sent into **Voicemeeter AUX**, then forwarded to **Voicemeeter VAIO**, which is set as the mic for your voice chat app via **B1**.
 

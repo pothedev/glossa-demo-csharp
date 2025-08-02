@@ -130,6 +130,13 @@ public class OutputProcessor : IDisposable
     {
         try
         {
+            // Skip entire processing if both translation and subtitles are disabled
+            if (!Config.OutputTranslateEnabled && !Config.SubtitlesEnabled)
+            {
+                Console.WriteLine("🔇 Both translation and subtitles disabled - skipping processing");
+                return;
+            }
+
             var streamingCall = _speechClient.StreamingRecognize();
             
             // Send configuration first
@@ -181,24 +188,37 @@ public class OutputProcessor : IDisposable
             if (!string.IsNullOrWhiteSpace(fullTranscript))
             {
                 Console.WriteLine($"✅ Full Transcription: {fullTranscript}");
-                string translated = await Translator.Translate(fullTranscript);
-                Console.WriteLine($"🌍 Full Translation: {translated}");
 
-                switch (Config.OutputTTSModel)
+                // Case 1: Translation enabled (subtitles don't matter)
+                if (Config.OutputTranslateEnabled)
                 {
-                    case "Google":
-                        _ = OutputTTS_Google.Speak(translated);
-                        break;
-                    case "ElevenLabs":
-                        _ = OutputTTS_ElevenLabs.Speak(translated);
-                        break;
-                    case "Native":
-                        _ = OutputTTS_Native.Speak(translated);
-                        break;
-                    default:
-                        _ = OutputTTS_Native.Speak(translated);
-                        break;
+                    string translated = await Translator.Translate(fullTranscript);
+                    Console.WriteLine($"🌍 Full Translation: {translated}");
+
+                    switch (Config.OutputTTSModel)
+                    {
+                        case "Google":
+                            _ = OutputTTS_Google.Speak(translated);
+                            break;
+                        case "ElevenLabs":
+                            _ = OutputTTS_ElevenLabs.Speak(translated);
+                            break;
+                        case "Native":
+                            _ = OutputTTS_Native.Speak(translated);
+                            break;
+                        default:
+                            _ = OutputTTS_Native.Speak(translated);
+                            break;
+                    }
                 }
+                // Case 2: Translation disabled but subtitles enabled
+                else if (Config.SubtitlesEnabled)
+                {
+                    string translated = await Translator.Translate(fullTranscript);
+                    Console.WriteLine($"🌍 Full Translation: {translated}");
+                    // No TTS in this case
+                }
+                // Case 3: Both disabled (already handled at start)
             }
         }
         catch (Exception ex)

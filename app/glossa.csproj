@@ -2,7 +2,7 @@
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>         <!-- Console App -->
-    <TargetFramework>net9.0</TargetFramework>  <!-- .NET version -->
+    <TargetFramework>net8.0</TargetFramework>  <!-- .NET version -->
     <ImplicitUsings>enable</ImplicitUsings>    <!-- Adds common `using` statements -->
     <Nullable>enable</Nullable>                <!-- Enables nullable warnings -->
   </PropertyGroup>

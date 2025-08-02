@@ -6,6 +6,19 @@ using System.Collections.Concurrent;
 using Google.Cloud.Speech.V1;
 using NAudio.Wave;
 using Google.Protobuf;
+using System.Runtime.InteropServices; // For key state check
+using Grpc.Core;
+
+public static class KeyChecker
+{
+    [DllImport("user32.dll")]
+    private static extern short GetAsyncKeyState(int vKey);
+
+    public static bool IsKeyDown(int vKey)
+    {
+        return vKey != 0 && (GetAsyncKeyState(vKey) & 0x8000) != 0;
+    }
+}
 
 public class InputProcessor
 {
@@ -14,6 +27,13 @@ public class InputProcessor
     private readonly BlockingCollection<byte[]> _audioBufferQueue = new BlockingCollection<byte[]>(100);
     private readonly CancellationTokenSource _cts = new CancellationTokenSource();
     private Task _processingTask;
+
+
+    private bool ShouldProcessInput()
+    {
+        return Config.InputTranslateEnabled && 
+               KeyChecker.IsKeyDown(Config.PushToTalkKey);
+    }
 
     public InputProcessor()
     {
@@ -43,7 +63,7 @@ public class InputProcessor
         {
             waveIn.WaveFormat = new WaveFormat(SampleRate, 1);
             waveIn.BufferMilliseconds = 100;
-            waveIn.DataAvailable += (s, e) => 
+            waveIn.DataAvailable += (s, e) =>
             {
                 var buffer = new byte[e.BytesRecorded];
                 Buffer.BlockCopy(e.Buffer, 0, buffer, 0, e.BytesRecorded);
@@ -63,15 +83,23 @@ public class InputProcessor
         {
             try
             {
-                // Create the streaming call
-                var streamingCall = _speechClient.StreamingRecognize();
-
-                // Start the writer task
-                var writeTask = Task.Run(async () =>
+                if (!ShouldProcessInput())
                 {
-                    try
+                    if (_audioBufferQueue.TryTake(out var _, 100, _cts.Token)) continue;
+                    await Task.Delay(100, _cts.Token);
+                    continue;
+                }
+
+                Console.WriteLine("Key pressed - starting speech processing");
+                using (var streamingCall = _speechClient.StreamingRecognize())
+                {
+                    // Buffer to hold audio for the grace period
+                    var gracePeriodBuffer = new List<byte[]>();
+                    var gracePeriodMs = 300; // Extend recording by 300ms after key release
+                    var gracePeriodEndTime = DateTime.MaxValue;
+
+                    var writeTask = Task.Run(async () =>
                     {
-                        // First write the config
                         await streamingCall.WriteAsync(new StreamingRecognizeRequest
                         {
                             StreamingConfig = new StreamingRecognitionConfig
@@ -81,54 +109,76 @@ public class InputProcessor
                                     Encoding = RecognitionConfig.Types.AudioEncoding.Linear16,
                                     SampleRateHertz = SampleRate,
                                     LanguageCode = Config.LanguageFrom,
-                                    //EnableAutomaticPunctuation = true
                                     Model = "latest_long"
                                 },
                                 InterimResults = false,
                             }
                         });
 
-                        // Then write the audio content
-                        foreach (var buffer in _audioBufferQueue.GetConsumingEnumerable(_cts.Token))
+                        while (!_cts.Token.IsCancellationRequested)
                         {
-                            await streamingCall.WriteAsync(new StreamingRecognizeRequest
+                            if (_audioBufferQueue.TryTake(out var buffer, 100, _cts.Token))
                             {
-                                AudioContent = ByteString.CopyFrom(buffer)
-                            });
+                                // If key is pressed or we're in grace period
+                                if (ShouldProcessInput() || DateTime.UtcNow < gracePeriodEndTime)
+                                {
+                                    await streamingCall.WriteAsync(new StreamingRecognizeRequest
+                                    {
+                                        AudioContent = ByteString.CopyFrom(buffer)
+                                    });
+
+                                    // If key was just released, start grace period
+                                    if (!ShouldProcessInput() && gracePeriodEndTime == DateTime.MaxValue)
+                                    {
+                                        gracePeriodEndTime = DateTime.UtcNow.AddMilliseconds(gracePeriodMs);
+                                        Console.WriteLine($"Starting {gracePeriodMs}ms grace period");
+                                    }
+                                }
+                                else
+                                {
+                                    break; // Grace period ended
+                                }
+                            }
                         }
-                    }
-                    finally
-                    {
                         await streamingCall.WriteCompleteAsync();
-                    }
-                });
+                    });
 
-                // Read responses
-                await foreach (var response in streamingCall.GetResponseStream())
-                {
-                    foreach (var result in response.Results)
+                    var readTask = Task.Run(async () =>
                     {
-                        if (result.IsFinal)
+                        try
                         {
-                            await ProcessFinalResult(result);
+                            await foreach (var response in streamingCall.GetResponseStream().WithCancellation(_cts.Token))
+                            {
+                                foreach (var result in response.Results)
+                                {
+                                    if (result.IsFinal)
+                                    {
+                                        await ProcessFinalResult(result);
+                                    }
+                                }
+                            }
                         }
-                    }
-                }
+                        catch (Exception ex) when (ex is OperationCanceledException || ex is TaskCanceledException)
+                        {
+                            // Normal shutdown
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine($"❌ Error reading responses: {ex.Message}");
+                        }
+                    });
 
-                await writeTask;
+                    await Task.WhenAll(writeTask, readTask);
+                }
             }
-            catch (Exception ex) when (ex is OperationCanceledException || ex is TaskCanceledException)
-            {
-                // Normal shutdown
-            }
+            catch (Exception ex) when (ex is OperationCanceledException || ex is TaskCanceledException) { }
             catch (Exception ex)
             {
                 Console.WriteLine($"❌ Processing error: {ex.Message}");
-                await Task.Delay(1000, _cts.Token);
+                await Task.Delay(1000);
             }
         }
     }
-
     private async Task ProcessFinalResult(StreamingRecognitionResult result)
     {
         try

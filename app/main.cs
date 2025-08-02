@@ -8,8 +8,10 @@ class Program
     static async Task Main()
     {
         Env.Load("../.env");
+        int PTTKey = Config.PushToTalkKey;
 
         Console.WriteLine("=== Voice Processor Menu ===");
+        Console.WriteLine($"Push to talk key: 0x{PTTKey:X}, {KeyCodeTranslator.GetKeyName(PTTKey)}");
         Console.WriteLine("1. Run Input Only");
         Console.WriteLine("2. Run Output Only");
         Console.WriteLine("3. Run Both Simultaneously");

@@ -8,9 +8,11 @@ using NAudio.CoreAudioApi;
 
 public static class InputTTS_Google
 {
+    private const string CredentialsPath = "../google-key.json"; // Relative to executable
+    
     public static async Task Speak(string text)
     {
-        
+
         // 1. Find audio output device
         using var enumerator = new MMDeviceEnumerator();
         var outputDevice = enumerator.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active)
@@ -18,8 +20,21 @@ public static class InputTTS_Google
                             ?? throw new Exception("Voicemeeter VAIO3 render device not found.");
 
         // 2. Initialize Google TTS client
-        var client = await TextToSpeechClient.CreateAsync();
-        
+        if (!File.Exists(CredentialsPath))
+        {
+            throw new FileNotFoundException(
+                $"Google credentials not found at: {Path.GetFullPath(CredentialsPath)}\n" +
+                "Please ensure:\n" +
+                "1. google-key.json exists in the project's root folder\n" +
+                "2. The file is copied to output directory (set 'Copy to Output Directory' = 'Copy if newer')"
+            );
+        }
+
+        var client = new TextToSpeechClientBuilder
+        {
+            CredentialsPath = CredentialsPath
+        }.Build();
+
 
         // 3. Configure voice parameters
         var voice = new VoiceSelectionParams
@@ -49,7 +64,7 @@ public static class InputTTS_Google
         using var waveOut = new WasapiOut(outputDevice, AudioClientShareMode.Shared, false, 200);
         using var mp3Stream = new MemoryStream(response.AudioContent.ToByteArray());
         using var reader = new Mp3FileReader(mp3Stream);
-        
+
         waveOut.Init(reader);
         waveOut.Play();
 

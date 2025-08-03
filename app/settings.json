@@ -1,0 +1,10 @@
+{
+  "UserLanguage": "uk-UA",
+  "TargetLanguage": "en-US",
+  "InputTTSModel": "Google",
+  "OutputTTSModel": "Native",
+  "PushToTalkKey": "0xA4",
+  "InputTranslateEnabled": true,
+  "OutputTranslateEnabled": true,
+  "SubtitlesEnabled": true
+}

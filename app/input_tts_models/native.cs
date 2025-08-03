@@ -52,10 +52,10 @@ public static class InputTTS_Native
         // 2. Initialize SpeechSynthesizer
         using var synthesizer = new SpeechSynthesizer();
         
-        // 3. Configure voice
-        var targetCulture = Config.LanguageTo;
+        // 3. Configure voice (FIXED EQUALS USAGE)
+        var targetCulture = Settings.GetValue<string>("LanguageTo");
         var installedVoice = synthesizer.GetInstalledVoices()
-            .FirstOrDefault(v => v.VoiceInfo.Culture.Name.Equals(targetCulture, StringComparison.OrdinalIgnoreCase));
+            .FirstOrDefault(v => string.Equals(v.VoiceInfo.Culture.Name, targetCulture, StringComparison.OrdinalIgnoreCase));
 
         if (installedVoice != null)
         {

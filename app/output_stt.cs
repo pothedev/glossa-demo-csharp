@@ -8,6 +8,7 @@ using NAudio.Wave;
 using NAudio.CoreAudioApi;
 using Google.Protobuf;
 using System.Collections.Generic;
+using System.Text.Json;
 
 public class OutputProcessor : IDisposable
 {
@@ -119,27 +120,40 @@ public class OutputProcessor : IDisposable
         await stopSignal.Task;
     }
 
-    private MMDevice GetAudioDevice(string nameContains)
+   private MMDevice GetAudioDevice(string nameContains)
     {
         using var enumerator = new MMDeviceEnumerator();
-        return enumerator.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active)
+        var device = enumerator.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active)
             .FirstOrDefault(d => d.FriendlyName.Contains(nameContains, StringComparison.OrdinalIgnoreCase));
+
+        if (device != null)
+        {
+            Console.WriteLine($"Found audio device: {device.FriendlyName}");
+        }
+        else
+        {
+            Console.WriteLine($"No audio device found containing: \"{nameContains}\"");
+        }
+
+        return device;
     }
+
 
     private async Task ProcessAudioWithStreaming(byte[] audioBytes)
     {
         try
         {
-            // Skip entire processing if both translation and subtitles are disabled
-            if (!Config.OutputTranslateEnabled && !Config.SubtitlesEnabled)
+            // Skip processing if both features disabled
+            if (!Settings.GetValue<bool>("OutputTranslateEnabled") && !Settings.GetValue<bool>("SubtitlesEnabled"))
             {
-                Console.WriteLine("🔇 Both translation and subtitles disabled - skipping processing");
                 return;
             }
 
+            // Initialize streaming call
             var streamingCall = _speechClient.StreamingRecognize();
-            
-            // Send configuration first
+            string languageCode = Settings.GetValue<string>("TargetLanguage");
+
+            // Configure speech recognition
             await streamingCall.WriteAsync(new StreamingRecognizeRequest
             {
                 StreamingConfig = new StreamingRecognitionConfig
@@ -148,10 +162,12 @@ public class OutputProcessor : IDisposable
                     {
                         Encoding = RecognitionConfig.Types.AudioEncoding.Linear16,
                         SampleRateHertz = TargetSampleRate,
-                        LanguageCode = Config.LanguageFrom,
-                        EnableAutomaticPunctuation = true
+                        LanguageCode = languageCode,
+                        EnableAutomaticPunctuation = true,
+                        Model = "latest_long"
                     },
-                    InterimResults = false
+                    InterimResults = false,
+                    SingleUtterance = false
                 }
             });
 
@@ -160,19 +176,20 @@ public class OutputProcessor : IDisposable
             while (offset < audioBytes.Length && !_cts.IsCancellationRequested)
             {
                 int chunkSize = Math.Min(StreamingChunkSize, audioBytes.Length - offset);
-                var request = new StreamingRecognizeRequest
+                await streamingCall.WriteAsync(new StreamingRecognizeRequest
                 {
                     AudioContent = ByteString.CopyFrom(audioBytes, offset, chunkSize)
-                };
-                await streamingCall.WriteAsync(request);
+                });
                 offset += chunkSize;
             }
-            
+
+            // Complete the stream
             await streamingCall.WriteCompleteAsync();
+
+            // Process responses
+            var transcripts = new List<string>();
             var responseStream = streamingCall.GetResponseStream();
 
-            // Process results
-            var transcripts = new List<string>();
             await foreach (var response in responseStream.WithCancellation(_cts.Token))
             {
                 foreach (var result in response.Results)
@@ -180,50 +197,47 @@ public class OutputProcessor : IDisposable
                     if (result.Alternatives.Count > 0)
                     {
                         transcripts.Add(result.Alternatives[0].Transcript);
+                        Console.WriteLine($"📊 Confidence: {result.Alternatives[0].Confidence:P}");
                     }
                 }
             }
 
-            string fullTranscript = string.Join(" ", transcripts);
-            if (!string.IsNullOrWhiteSpace(fullTranscript))
+            // Output results
+            if (transcripts.Count > 0)
             {
-                Console.WriteLine($"✅ Full Transcription: {fullTranscript}");
+                string fullTranscript = string.Join(" ", transcripts);
+                Console.WriteLine($"✅ Final Transcription: {fullTranscript}");
 
-                // Case 1: Translation enabled (subtitles don't matter)
-                if (Config.OutputTranslateEnabled)
+                if (Settings.GetValue<bool>("OutputTranslateEnabled"))
                 {
-                    string translated = await Translator.Translate(fullTranscript);
-                    Console.WriteLine($"🌍 Full Translation: {translated}");
+                    string translated = await Translator.Translate(
+                        fullTranscript,
+                        Settings.GetValue<string>("TargetLanguage").Substring(0, 2),
+                        Settings.GetValue<string>("UserLanguage").Substring(0, 2)
+                    );
+                    Console.WriteLine($"🌍 Translation: {translated}");
 
-                    switch (Config.OutputTTSModel)
+                    switch (Settings.GetValue<string>("OutputTTSModel"))
                     {
-                        case "Google":
-                            _ = OutputTTS_Google.Speak(translated);
-                            break;
-                        case "ElevenLabs":
-                            _ = OutputTTS_ElevenLabs.Speak(translated);
-                            break;
-                        case "Native":
-                            _ = OutputTTS_Native.Speak(translated);
-                            break;
-                        default:
-                            _ = OutputTTS_Native.Speak(translated);
-                            break;
+                        case "Google": _ = OutputTTS_Google.Speak(translated); break;
+                        case "ElevenLabs": _ = OutputTTS_ElevenLabs.Speak(translated); break;
+                        default: _ = OutputTTS_Native.Speak(translated); break;
                     }
                 }
-                // Case 2: Translation disabled but subtitles enabled
-                else if (Config.SubtitlesEnabled)
+                else if (Settings.GetValue<bool>("SubtitlesEnabled"))
                 {
-                    string translated = await Translator.Translate(fullTranscript);
-                    Console.WriteLine($"🌍 Full Translation: {translated}");
-                    // No TTS in this case
+                    string translated = await Translator.Translate(
+                        fullTranscript,
+                        Settings.GetValue<string>("TargetLanguage").Substring(0, 2),
+                        Settings.GetValue<string>("UserLanguage").Substring(0, 2)
+                    );
+                    Console.WriteLine($"🌍 Translation: {translated}");
                 }
-                // Case 3: Both disabled (already handled at start)
             }
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"❌ gRPC Streaming error: {ex.Message}");
+            Console.WriteLine($"❌ Processing error: {ex.Message}");
         }
     }
 

@@ -10,7 +10,7 @@ using NAudio.CoreAudioApi;
 
 public static class OutputTTS_Native
 {
-    private const string OutputDeviceName = "Voicemeeter VAIO3";
+    private const string OutputDeviceName = "Voicemeeter AUX";
     private static readonly ConcurrentQueue<string> _speechQueue = new();
     private static readonly SemaphoreSlim _playbackLock = new(1, 1);
     private static bool _isPlaying;
@@ -66,7 +66,7 @@ public static class OutputTTS_Native
 
     private static void ConfigureVoice(SpeechSynthesizer synthesizer)
     {
-        var targetCulture = Config.LanguageTo;
+        var targetCulture = Settings.GetValue<string>("LanguageTo");
         var installedVoice = synthesizer.GetInstalledVoices()
             .FirstOrDefault(v => v.VoiceInfo.Culture.Name.Equals(targetCulture, StringComparison.OrdinalIgnoreCase));
 

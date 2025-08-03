@@ -7,14 +7,11 @@ using System.Text.Json;
 
 public static class Translator
 {
-    public static async Task<string> Translate(string text)
+    public static async Task<string> Translate(string text, string languageFrom, string languageTo)
     {
         string DeeplKey = Environment.GetEnvironmentVariable("DEEPL_API_KEY");
         if (string.IsNullOrEmpty(DeeplKey))
             throw new Exception("DEEPL_API_KEY is missing in .env or environment.");
-
-        string languageTo = Config.LanguageTo.Substring(0, 2).ToUpper();
-        string languageFrom = Config.LanguageFrom.Substring(0, 2).ToUpper();
 
         using var client = new HttpClient();
         var content = new FormUrlEncodedContent(new[]

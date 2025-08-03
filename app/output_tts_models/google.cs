@@ -11,7 +11,7 @@ using NAudio.CoreAudioApi;
 public static class OutputTTS_Google
 {
     private static TextToSpeechClient _ttsClient;
-    private const string OutputDeviceName = "Voicemeeter VAIO3";
+    private const string OutputDeviceName = "Voicemeeter AUX";
     private static readonly ConcurrentQueue<string> _speechQueue = new();
     private static readonly SemaphoreSlim _playbackLock = new(1, 1);
     private static bool _isPlaying;
@@ -57,8 +57,8 @@ public static class OutputTTS_Google
         // Configure voice
         var voice = new VoiceSelectionParams
         {
-            LanguageCode = Config.LanguageTo,
-            Name = $"{Config.LanguageTo}-Wavenet-A",
+            LanguageCode = Settings.GetValue<string>("LanguageTo"),
+            Name = $"{Settings.GetValue<string>("LanguageTo")}-Wavenet-A",
             SsmlGender = SsmlVoiceGender.Male
         };
 

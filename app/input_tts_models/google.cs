@@ -39,8 +39,8 @@ public static class InputTTS_Google
         // 3. Configure voice parameters
         var voice = new VoiceSelectionParams
         {
-            LanguageCode = Config.LanguageTo,
-            Name = $"{Config.LanguageTo}-Wavenet-A", // uk-UA-Wavenet-A en-US-Wavenet-D
+            LanguageCode = Settings.GetValue<string>("LanguageTo"),
+            Name = $"{Settings.GetValue<string>("LanguageTo")}-Wavenet-A", // uk-UA-Wavenet-A en-US-Wavenet-D
             SsmlGender = SsmlVoiceGender.Male
         };
 

@@ -14,9 +14,31 @@ public static class KeyChecker
     [DllImport("user32.dll")]
     private static extern short GetAsyncKeyState(int vKey);
 
-    public static bool IsKeyDown(int vKey)
+    public static bool IsKeyDown(string vKey)
     {
-        return vKey != 0 && (GetAsyncKeyState(vKey) & 0x8000) != 0;
+        if (string.IsNullOrEmpty(vKey))
+            return false;
+
+        try
+        {
+            // Handle hex strings ("0xA4") and named keys ("LeftAlt")
+            int keyCode = ParseKeyCode(vKey);
+            return keyCode != 0 && (GetAsyncKeyState(keyCode) & 0x8000) != 0;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+    private static int ParseKeyCode(string key)
+    {
+        // Hex format (e.g., "0xA4")
+        if (key.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
+        {
+            return Convert.ToInt32(key.Substring(2), 16);
+        }
+
+        return 0;
     }
 }
 
@@ -31,8 +53,8 @@ public class InputProcessor
 
     private bool ShouldProcessInput()
     {
-        return Config.InputTranslateEnabled && 
-               KeyChecker.IsKeyDown(Config.PushToTalkKey);
+        return Settings.GetValue<bool>("InputTranslateEnabled") && 
+               KeyChecker.IsKeyDown(Settings.GetValue<string>("PushToTalkKey"));
     }
 
     public InputProcessor()
@@ -108,7 +130,7 @@ public class InputProcessor
                                 {
                                     Encoding = RecognitionConfig.Types.AudioEncoding.Linear16,
                                     SampleRateHertz = SampleRate,
-                                    LanguageCode = Config.LanguageFrom,
+                                    LanguageCode = Settings.GetValue<string>("LanguageFrom"),
                                     Model = "latest_long"
                                 },
                                 InterimResults = false,
@@ -186,10 +208,12 @@ public class InputProcessor
             string transcript = result.Alternatives[0].Transcript;
             Console.WriteLine($"✅ Final: {transcript}");
 
-            string translated = await Translator.Translate(transcript);
+            string languageFrom = Settings.GetValue<string>("UserLanguage").Substring(0, 2).ToUpper();
+            string languageTo = Settings.GetValue<string>("TargetLanguage").Substring(0, 2).ToUpper();
+            string translated = await Translator.Translate(transcript, languageFrom, languageTo);
             Console.WriteLine($"🌍 Translated: {translated}");
 
-            switch (Config.InputTTSModel)
+            switch (Settings.GetValue<string>("InputTTSModel"))
             {
                 case "Google":
                     await InputTTS_Google.Speak(translated);

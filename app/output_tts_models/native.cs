@@ -66,7 +66,7 @@ public static class OutputTTS_Native
 
     private static void ConfigureVoice(SpeechSynthesizer synthesizer)
     {
-        var targetCulture = Settings.GetValue<string>("LanguageTo");
+        var targetCulture = Settings.GetValue<string>("UserLanguage");
         var installedVoice = synthesizer.GetInstalledVoices()
             .FirstOrDefault(v => v.VoiceInfo.Culture.Name.Equals(targetCulture, StringComparison.OrdinalIgnoreCase));
 

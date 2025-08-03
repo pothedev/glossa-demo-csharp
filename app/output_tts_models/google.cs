@@ -15,6 +15,7 @@ public static class OutputTTS_Google
     private static readonly ConcurrentQueue<string> _speechQueue = new();
     private static readonly SemaphoreSlim _playbackLock = new(1, 1);
     private static bool _isPlaying;
+    private const string CredentialsPath = "../google-key.json";
 
     public static Task Speak(string text)
     {
@@ -25,7 +26,7 @@ public static class OutputTTS_Google
 
     private static async Task ProcessQueueAsync()
     {
-        if (_isPlaying) return; // Already processing
+        if (_isPlaying) return;
 
         await _playbackLock.WaitAsync();
         try
@@ -33,7 +34,14 @@ public static class OutputTTS_Google
             _isPlaying = true;
             while (_speechQueue.TryDequeue(out var text))
             {
-                await PlayTextAsync(text);
+                try
+                {
+                    await PlayTextAsync(text);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"❌ Error processing TTS: {ex.Message}");
+                }
             }
         }
         finally
@@ -45,20 +53,42 @@ public static class OutputTTS_Google
 
     private static async Task PlayTextAsync(string text)
     {
-        // Initialize Google TTS client (reusable)
-        _ttsClient ??= await TextToSpeechClient.CreateAsync();
+        // Initialize client with proper error handling
+        if (_ttsClient == null)
+        {
+            try
+            {
+                Environment.SetEnvironmentVariable("GOOGLE_APPLICATION_CREDENTIALS", CredentialsPath);
+                _ttsClient = await new TextToSpeechClientBuilder().BuildAsync();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ TTS client init failed: {ex.Message}");
+                throw;
+            }
+        }
 
-        // Find audio output device
-        using var enumerator = new MMDeviceEnumerator();
-        var outputDevice = enumerator.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active)
-                                .FirstOrDefault(d => d.FriendlyName.Contains(OutputDeviceName))
-                            ?? throw new Exception($"{OutputDeviceName} not found");
+        // Find audio output device with fallback
+        MMDevice outputDevice;
+        try
+        {
+            using var enumerator = new MMDeviceEnumerator();
+            outputDevice = enumerator.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active)
+                .FirstOrDefault(d => d.FriendlyName.Contains(OutputDeviceName, StringComparison.OrdinalIgnoreCase))
+                ?? enumerator.GetDefaultAudioEndpoint(DataFlow.Render, Role.Console);
+            
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"❌ Audio device error: {ex.Message}");
+            throw;
+        }
 
         // Configure voice
         var voice = new VoiceSelectionParams
         {
-            LanguageCode = Settings.GetValue<string>("LanguageTo"),
-            Name = $"{Settings.GetValue<string>("LanguageTo")}-Wavenet-A",
+            LanguageCode = Settings.GetValue<string>("UserLanguage"),
+            Name = $"{Settings.GetValue<string>("UserLanguage")}-Wavenet-A",
             SsmlGender = SsmlVoiceGender.Male
         };
 
@@ -84,15 +114,23 @@ public static class OutputTTS_Google
 
     private static async Task PlayAudioAsync(byte[] mp3Data, MMDevice outputDevice)
     {
-        using var waveOut = new WasapiOut(outputDevice, AudioClientShareMode.Shared, false, 200);
-        using var mp3Stream = new MemoryStream(mp3Data);
-        using var reader = new Mp3FileReader(mp3Stream);
-        
-        var tcs = new TaskCompletionSource<bool>();
-        waveOut.PlaybackStopped += (s, e) => tcs.TrySetResult(true);
-        
-        waveOut.Init(reader);
-        waveOut.Play();
-        await tcs.Task; // Wait for playback to complete
+        try
+        {
+            using var waveOut = new WasapiOut(outputDevice, AudioClientShareMode.Shared, false, 200);
+            using var mp3Stream = new MemoryStream(mp3Data);
+            using var reader = new Mp3FileReader(mp3Stream);
+            
+            var tcs = new TaskCompletionSource<bool>();
+            waveOut.PlaybackStopped += (s, e) => tcs.TrySetResult(true);
+            
+            waveOut.Init(reader);
+            waveOut.Play();
+            await tcs.Task;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"❌ Audio playback error: {ex.Message}");
+            throw;
+        }
     }
 }

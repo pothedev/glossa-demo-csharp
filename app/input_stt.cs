@@ -37,8 +37,16 @@ public static class KeyChecker
         {
             return Convert.ToInt32(key.Substring(2), 16);
         }
-
-        return 0;
+        
+        // Named keys fallback (add more as needed)
+        return key.ToUpperInvariant() switch
+        {
+            "LEFTALT" => 0xA4,
+            "RIGHTALT" => 0xA5,
+            "F1" => 0x70,
+            "SPACE" => 0x20,
+            _ => 0 // Unknown key
+        };
     }
 }
 
@@ -130,7 +138,7 @@ public class InputProcessor
                                 {
                                     Encoding = RecognitionConfig.Types.AudioEncoding.Linear16,
                                     SampleRateHertz = SampleRate,
-                                    LanguageCode = Settings.GetValue<string>("LanguageFrom"),
+                                    LanguageCode = Settings.GetValue<string>("UserLanguage"),
                                     Model = "latest_long"
                                 },
                                 InterimResults = false,
@@ -208,8 +216,9 @@ public class InputProcessor
             string transcript = result.Alternatives[0].Transcript;
             Console.WriteLine($"✅ Final: {transcript}");
 
-            string languageFrom = Settings.GetValue<string>("UserLanguage").Substring(0, 2).ToUpper();
-            string languageTo = Settings.GetValue<string>("TargetLanguage").Substring(0, 2).ToUpper();
+            string languageTo = Settings.GetValue<string>("TargetLanguage").Substring(0, 2);
+            string languageFrom = Settings.GetValue<string>("UserLanguage").Substring(0, 2);
+
             string translated = await Translator.Translate(transcript, languageFrom, languageTo);
             Console.WriteLine($"🌍 Translated: {translated}");
 

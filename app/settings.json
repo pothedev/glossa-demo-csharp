@@ -1,8 +1,8 @@
 {
   "UserLanguage": "uk-UA",
   "TargetLanguage": "en-US",
-  "InputTTSModel": "Google",
-  "OutputTTSModel": "Native",
+  "InputTTSModel": "ElevenLabs",
+  "OutputTTSModel": "Google",
   "PushToTalkKey": "0xA4",
   "InputTranslateEnabled": true,
   "OutputTranslateEnabled": true,
